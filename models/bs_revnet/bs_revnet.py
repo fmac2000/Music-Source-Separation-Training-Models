@@ -1,3 +1,8 @@
+'''
+Credit:
+https://github.com/karttikeya/minREV Ze Liu, Yutong Lin, Yixuan Wei
+'''
+
 from functools import partial
 
 import torch
