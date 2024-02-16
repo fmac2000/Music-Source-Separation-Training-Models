@@ -35,6 +35,11 @@ def get_model_from_config(model_type, config):
         model = MultiMaskMultiSourceBandSplitRNNSimple(
             **config.model
         )
+    elif model_type == 'bs_revnet':
+        from models.bs_revnet import BSRevnet
+        model = BSRevnet(
+            **dict(config.model)
+        )
     else:
         print('Unknown model: {}'.format(model_type))
         model = None
