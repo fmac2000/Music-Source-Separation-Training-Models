@@ -119,7 +119,7 @@ training:
   ema_momentum: 0.999
   optimizer: adam
   other_fix: false # it's needed for checking on multisong dataset if other is actually instrumental
-  use_amp: true # enable or disable usage of mixed precision (float16) - usually it must be true
+  use_amp: false # bs_revnet amp must be disabled globally as it is done infile
 
 augmentations:
   enable: true # enable or disable all augmentations (to fast disable if needed)
