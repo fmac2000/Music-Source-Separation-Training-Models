@@ -330,7 +330,7 @@ def train_model(args):
                         )
 
             loss /= gradient_accumulation_steps
-            scaler.scale(loss).backward()
+            scaler.scale(loss).backward(retain_graph=(args.model_type in ['bs_revnet']))
             if config.training.grad_clip:
                 nn.utils.clip_grad_norm_(model.parameters(), config.training.grad_clip)
 
