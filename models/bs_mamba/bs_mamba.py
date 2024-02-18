@@ -127,7 +127,7 @@ class MambaModule(Module):
             attn_state = 16, attn_conv = 4, attn_expand = 2,    # attn-sized mamba
             ff_state = 16, ff_conv = 4, ff_expand = 2,          # ff-sized mamba
 
-            use_moe = False, num_experts = None, top_k = None
+            use_moe = False, num_experts = None, top_k = None   # moe params
         ):
         super().__init__()
 
@@ -268,18 +268,25 @@ class BSMamba(Module):
     @beartype
     def __init__(
             self,
-            dim,
             *,
-            depth,
+
             stereo=False,
             num_stems=1,
             freqs_per_bands: Tuple[int, ...] = DEFAULT_FREQS_PER_BANDS,
 
+            depth,
             time_mamba_depth=2,
             freq_mamba_depth=2,
-            d_state = 16, 
-            d_conv = 4, 
-            expand = 2,
+            d_model = 192,
+            attn_state = 16,
+            attn_conv = 4,
+            attn_expand = 2,
+            ff_state = 16,
+            ff_conv = 4,
+            ff_expand = 2,
+            use_moe = True,
+            num_experts = 4,
+            top_k = 2,
 
             stft_n_fft=2048,
             stft_hop_length=512,
@@ -313,10 +320,16 @@ class BSMamba(Module):
         """
 
         mamba_kwargs = dict(
-            d_model = dim, 
-            d_state = d_state, 
-            d_conv = d_conv, 
-            expand = expand
+            d_model = d_model,
+            attn_state = attn_state,
+            attn_conv = attn_conv,
+            attn_expand = attn_expand,
+            ff_state = ff_state,
+            ff_conv = ff_conv,
+            ff_expand = ff_expand,
+            use_moe = use_moe,
+            num_experts = num_experts,
+            top_k = top_k
         )
         
         for _ in range(depth):

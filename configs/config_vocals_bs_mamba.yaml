@@ -9,8 +9,6 @@ audio:
   min_mean_abs: 0.001
 
 model:
-  dim: 192
-  depth: 6
   stereo: true
   num_stems: 1
   freqs_per_bands: !!python/tuple
@@ -76,9 +74,12 @@ model:
     - 48
     - 128
     - 129
+
+  depth: 6
   time_mamba_depth: 1
   freq_mamba_depth: 1
 
+  d_model: 192
   attn_state: 16
   attn_conv: 4
   attn_expand: 2
