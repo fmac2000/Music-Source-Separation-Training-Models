@@ -78,9 +78,17 @@ model:
     - 129
   time_mamba_depth: 1
   freq_mamba_depth: 1
-  d_state: 16
-  d_conv: 4
-  expand: 2
+
+  attn_state: 16
+  attn_conv: 4
+  attn_expand: 2
+  ff_state: 16
+  ff_conv: 4
+  ff_expand: 2
+  use_moe: true
+  num_experts: 4
+  top_k: 2
+
   stft_n_fft: 2048
   stft_hop_length: 512
   stft_win_length: 2048

@@ -48,8 +48,61 @@ class RMSNorm(Module):
         return F.normalize(x, dim=-1) * self.scale * self.gamma
 
 
+class MoELayer(Module):
+    """
+    Theory:
+    https://arxiv.org/abs/2402.01771
+    https://arxiv.org/abs/2401.04081
+    https://arxiv.org/pdf/2210.05144
+
+    Mamba as the expert
+    TODO: Block should be replaced with custom kernel for parallel computation
+    TODO: https://github.com/microsoft/tutel
+    """
+    def __init__(
+            self, d_model, d_state = 16, d_conv = 4, expand = 2, eps = 1e-5,
+            num_experts = 4, top_k = 2
+        ):
+        super().__init__()
+
+        self.top_k = top_k
+        self.num_experts = num_experts
+        self.router = Linear(d_model, num_experts)
+        self.norm = fusedRMSNorm(d_model, eps=eps)
+
+        self.experts = ModuleList(
+            [
+                Mamba(d_model, d_state, d_conv, expand, eps)
+                for i in range(num_experts)
+            ]   
+        )
+    
+    def forward(self, x, residual = None, params = None):
+        
+        x_shape = x.shape
+        x, residual = self.norm(x, residual = residual, prenorm = True)
+
+        route = self.router(x)
+        route = route.view(-1, self.num_experts)
+        route = torch.softmax(route, dim=1)
+
+        k_probs, k_indices = torch.topk(route, k=self.top_k, dim=1)
+        
+        x = x.view(-1, x_shape[-1])
+
+        for idx, expert in enumerate(self.experts):
+            for k in self.top_k:
+                indices = (k_indices[:, k] == idx).nonzero()
+                if indices.numel() > 0:
+                    x[indices] = expert(x[indices], inference_params = params)
+                    x[indices] *= k_probs[:, k][indices].unsqueeze(1)
+
+        x = x.view(*x_shape)
+        return x, residual
+
+
 class MambaLayer(Module):
-    def __init__(self, d_model, d_state = 16, d_conv = 4, expand = 2, eps = 1e-5):
+    def __init__(self, d_model, d_state = 16, d_conv = 4, expand = 2, eps = 1e-5, **kwargs):
         super().__init__()
         self.norm = fusedRMSNorm(d_model, eps=eps)
         self.mamba = Mamba(
@@ -68,14 +121,28 @@ class MambaLayer(Module):
 
 
 class MambaModule(Module):
-    def __init__(self, d_model, d_state = 16, d_conv = 4, expand = 2, eps = 1e-5, depth = 1):
+    def __init__(
+            self, d_model, depth = 1, eps = 1e-5
+
+            attn_state = 16, attn_conv = 4, attn_expand = 2,    # attn-sized mamba
+            ff_state = 16, ff_conv = 4, ff_expand = 2,          # ff-sized mamba
+
+            use_moe = False, num_experts = None, top_k = None
+        ):
         super().__init__()
 
-        self.layers = nn.ModuleList(
+        layer = MoELayer if use_moe else MambaLayer
+        kwargs = {
+            d_state: ff_state, d_conv: ff_conv, d_expand: ff_expand,
+            num_experts: num_experts, top_k: top_k
+        }
+        
+        self.layers = ModuleList(
             [
-                MambaLayer(d_model, d_state, d_conv, expand, eps)
-                for i in range(depth)
+                MambaLayer(d_model=d_model, d_state=attn_state, d_conv=attn_conv, expand=attn_expand, eps=eps),
+                layer(d_model=d_model, eps=eps **kwargs)
             ]
+            for i in range(depth)
         )
 
         self.norm = fusedRMSNorm(d_model, eps = eps)
@@ -244,7 +311,7 @@ class BSMamba(Module):
             1.4B	48	2048
             2.8B	64	2560
         """
-        
+
         mamba_kwargs = dict(
             d_model = dim, 
             d_state = d_state, 
