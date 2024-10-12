@@ -66,8 +66,8 @@ class Attend(nn.Module):
 
     def flash_attn(self, q, k, v):
         
-        q1, q2 = rearrange(q, 'b n (h 2) d -> 2 b n h d')
-        k1, k2 = rearrange(k, 'b n (h 2) d -> 2 b n h d')
+        q1, q2 = q.chunk(2, dim=2)
+        k1, k2 = k.chunk(2, dim=2)
 
         attn1 = flash_attn_func(q1, k1, v, causal=True)
         attn2 = flash_attn_func(q2, k2, v, causal=True)
@@ -78,7 +78,7 @@ class Attend(nn.Module):
         lambda_full = lambda_1 - lambda_2 + self.lambda_init
         
         attn = attn1 - lambda_full * attn2
-        #size here should be b n h d
+
         return attn
 
     def forward(self, q, k, v):
@@ -114,7 +114,7 @@ class Attend(nn.Module):
         lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()).type_as(q)
         lambda_full = lambda_1 - lambda_2 + self.lambda_init
         
-        attn = rearrange(attn, 'b h (2 i) j, -> b h 2 i j')
+        attn = rearrange(attn, 'b h (t i) j, -> b h t i j', t=2) #needs checking
         attn = attn[:, :, 0] - lambda_full * attn[:, :, 1]
 
         # aggregate values

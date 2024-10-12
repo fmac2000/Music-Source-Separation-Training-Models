@@ -158,7 +158,7 @@ class Attention(Module):
         v = rearrange(v, ' b n (h d) ->  b n h d', h = self.heads // 2)
 
         #embed
-        self.rotary(q, k)
+        #self.rotary(q, k)
         attn = self.attend(q, k, v)
             
         #groupnorm with scale
