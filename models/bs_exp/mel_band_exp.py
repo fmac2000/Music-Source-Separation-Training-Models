@@ -138,7 +138,7 @@ class Attention(Module):
         #groupnorm
         self.subnorm = RMSNorm(dim_head)
         
-        self.attend = Attend(flash=flash, dropout=dropout)
+        self.attend = Attend(dim_head, flash=flash, dropout=dropout)
 
         self.to_qkv = nn.Linear(dim, dim_inner * 3, bias=False)
 

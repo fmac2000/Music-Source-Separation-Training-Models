@@ -44,6 +44,7 @@ print_once = once(print)
 class Attend(nn.Module):
     def __init__(
         self,
+        dim_head,
         dropout = 0.,
         flash = False,
         scale = None,
@@ -54,6 +55,11 @@ class Attend(nn.Module):
         self.dropout = dropout
         self.attn_dropout = nn.Dropout(dropout)
         self.lambda_init = lambda_init_fn(depth)
+
+        self.lambda_q1 = nn.Parameter(torch.zeros(dim_head, dtype=torch.float32).normal_(mean=0,std=0.1))
+        self.lambda_k1 = nn.Parameter(torch.zeros(dim_head, dtype=torch.float32).normal_(mean=0,std=0.1))
+        self.lambda_q2 = nn.Parameter(torch.zeros(dim_head, dtype=torch.float32).normal_(mean=0,std=0.1))
+        self.lambda_k2 = nn.Parameter(torch.zeros(dim_head, dtype=torch.float32).normal_(mean=0,std=0.1))
 
         self.flash = flash
         assert not (flash and version.parse(torch.__version__) < version.parse('2.0.0')), 'in order to use flash attention, you must be using pytorch 2.0 or above'
