@@ -78,7 +78,7 @@ class Attend(nn.Module):
         lambda_full = lambda_1 - lambda_2 + self.lambda_init
         
         attn = attn1 - lambda_full * attn2
-
+        #size here should be b n h d
         return attn
 
     def forward(self, q, k, v):
@@ -119,5 +119,7 @@ class Attend(nn.Module):
 
         # aggregate values
         attn = einsum(f"b h i j, b h j d -> b h i d", attn, v)
+
+        attn = rearrange(attn, 'b h n d -> b n h d')
 
         return attn

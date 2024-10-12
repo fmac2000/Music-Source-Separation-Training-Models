@@ -131,7 +131,7 @@ class Attention(Module):
         super().__init__()
         self.heads = heads
         self.scale = dim_head ** -0.5
-        dim_inner = heads * dim_head
+        self.dim_inner = heads * dim_head
 
         self.norm = RMSNorm(dim) 
         self.rotary = rotary_embed
@@ -141,10 +141,10 @@ class Attention(Module):
         
         self.attend = Attend(dim_head, flash=flash, dropout=dropout)
 
-        self.to_qkv = nn.Linear(dim, dim_inner * 3, bias=False)
+        self.to_qkv = nn.Linear(dim, self.dim_inner * 3, bias=False)
 
         self.to_out = nn.Sequential(
-            nn.Linear(dim_inner, dim, bias=False),
+            nn.Linear(self.dim_inner, dim, bias=False),
             nn.Dropout(dropout)
         )
 
@@ -152,10 +152,10 @@ class Attention(Module):
         x = self.norm(x)
 
         #project
-        q, k, v = rearrange(self.to_qkv(x), 'b n (qkv h d) -> qkv b n h d', qkv=3, h=self.heads)
-        q = rearrange(q, 'b n h d -> b n (h 2) d')
-        k = rearrange(k, 'b n h d -> b n (h 2) d')
-        v = rearrange(v, 'b h n d -> b n h (d 2)')
+        q, k, v = rearrange(self.to_qkv(x), 'b n (qkv hd) -> qkv b n hd', qkv=3)
+        q = rearrange(q, ' b n (h d) ->  b n h d', d = self.dim_inner // 2)
+        k = rearrange(k, ' b n (h d) ->  b n h d', d = self.dim_inner // 2)
+        v = rearrange(v, ' b n (h d) ->  b n h d', h = self.heads // 2)
 
         #embed
         self.rotary(q, k)
