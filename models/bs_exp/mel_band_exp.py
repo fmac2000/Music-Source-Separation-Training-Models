@@ -63,7 +63,8 @@ class RotaryEmbedWrapper(Module):
             q, 
             self.net._cos_cached,
             self.net._sin_cached, 
-            interleaved=True
+            interleaved=True,
+            inplace=True
         )
         k = apply_rotary_emb(
             k, 
