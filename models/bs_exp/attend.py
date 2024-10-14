@@ -65,10 +65,12 @@ class Attend(nn.Module):
         assert not (flash and version.parse(torch.__version__) < version.parse('2.0.0')), 'in order to use flash attention, you must be using pytorch 2.0 or above'
 
     def flash_attn(self, q, k, v):
-        
-        q1, q2 = q.chunk(2, dim=2)
-        k1, k2 = k.chunk(2, dim=2)
+        #b h n d
+        q1, q2 = rearrange(q, 'b (h t) n d -> t b n h d', t=2)
+        k1, k2 = rearrange(k, 'b (h t) n d -> t b n h d', t=2)
+        v = rearrange(v, 'b h n d -> b n h d')
 
+        print(q1.shape, k1.shape, v.shape)
         attn1 = flash_attn_func(q1, k1, v, causal=True)
         attn2 = flash_attn_func(q2, k2, v, causal=True)
 
@@ -89,17 +91,12 @@ class Attend(nn.Module):
         n, i, j - sequence length (base sequence length, source, target)
         d - feature dimension
         """
-
+        if self.flash:
+            return self.flash_attn(q, k, v)
+        
         q_len, k_len, device = q.shape[-2], k.shape[-2], q.device
 
         scale = default(self.scale, q.shape[-1] ** -0.5)
-
-        if self.flash:
-            return self.flash_attn(q, k, v)
-
-        q = rearrange(q, 'b n h d -> b h n d')
-        k = rearrange(k, 'b n h d -> b h n d')
-        v = rearrange(v, 'b n h d -> b h n d')
 
         # similarity
 

@@ -7,19 +7,16 @@ from torch.nn import Module, ModuleList
 import torch.nn.functional as F
 
 from models.bs_exp.attend import Attend
-#from models.bs_exp.rotary import apply_rotary_emb
 
 from beartype.typing import Tuple, Optional, List, Callable
 from beartype import beartype
 
-#from rotary_embedding_torch import RotaryEmbedding
+from rotary_embedding_torch import RotaryEmbedding
 
 from einops import rearrange, pack, unpack, reduce, repeat
 from einops.layers.torch import Rearrange
 
 from librosa import filters
-
-from flash_attn.layers.rotary import RotaryEmbedding, apply_rotary_emb
 
 # helper functions
 
@@ -47,32 +44,6 @@ def pad_at_dim(t, pad, dim=-1, value=0.):
 
 def l2norm(t):
     return F.normalize(t, dim=-1, p=2)
-
-class RotaryEmbedWrapper(Module):
-    def __init__(self, dim, interleaved):
-        super().__init__()
-        self.net = RotaryEmbedding(dim=dim, interleaved=interleaved)
-        self.seqlen = None
-
-    def forward(self, q, k):
-        if self.seqlen != q.shape[0]:
-            self.seqlen = q.shape[0]
-            self.net._update_cos_sin_cache(self.seqlen, device=q.device, dtype=q.dtype)
-        
-        q = apply_rotary_emb(
-            q, 
-            self.net._cos_cached,
-            self.net._sin_cached, 
-            interleaved=True,
-            inplace=True
-        )
-        k = apply_rotary_emb(
-            k, 
-            self.net._cos_cached,
-            self.net._sin_cached, 
-            interleaved=True,
-            inplace=True
-        )
 
 # norm
 
@@ -132,9 +103,10 @@ class Attention(Module):
         self.heads = heads
         self.scale = dim_head ** -0.5
         self.dim_inner = heads * dim_head
+        self.dim_head = dim_head
 
         self.norm = RMSNorm(dim) 
-        self.rotary = rotary_embed
+        self.rotary_embed = rotary_embed
 
         #groupnorm
         self.subnorm = RMSNorm(dim_head)
@@ -153,14 +125,20 @@ class Attention(Module):
 
         #project
         q, k, v = rearrange(self.to_qkv(x), 'b n (qkv hd) -> qkv b n hd', qkv=3)
-        q = rearrange(q, ' b n (h d) ->  b n h d', d = self.dim_inner // 2)
-        k = rearrange(k, ' b n (h d) ->  b n h d', d = self.dim_inner // 2)
-        v = rearrange(v, ' b n (h d) ->  b n h d', h = self.heads // 2)
+
+        q = rearrange(q, 'b n (h d) ->  b h n d', h = self.heads)
+        k = rearrange(k, 'b n (h d) ->  b h n d', h = self.heads)
+        v = rearrange(v, 'b n (h d) ->  b h n d', h = self.heads // 2)
 
         #embed
-        #self.rotary(q, k)
+        if exists(self.rotary_embed):
+            q = self.rotary_embed.rotate_queries_or_keys(q) # b h n d
+            k = self.rotary_embed.rotate_queries_or_keys(k) # b h n d
+
         attn = self.attend(q, k, v)
             
+        input('passed')
+        exit()
         #groupnorm with scale
         attn = self.subnorm(attn)
         attn = attn * (1 - self.lambda_init)
@@ -409,8 +387,8 @@ class MelBandExp(Module):
             ff_dropout=ff_dropout
         )
 
-        time_rotary_embed = RotaryEmbedWrapper(dim=dim_head, interleaved=True)
-        freq_rotary_embed = RotaryEmbedWrapper(dim=dim_head, interleaved=True)
+        time_rotary_embed = RotaryEmbedding(dim_head)
+        freq_rotary_embed = RotaryEmbedding(dim_head)
 
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
