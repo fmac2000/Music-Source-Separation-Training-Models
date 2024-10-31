@@ -15,6 +15,7 @@ import wandb
 import soundfile as sf
 import numpy as np
 import auraloss
+import loralib as lora
 import torch.nn as nn
 from torch.optim import Adam, AdamW, SGD, RAdam, RMSprop
 from torch.utils.data import DataLoader
@@ -23,7 +24,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.nn.functional as F
 
 from dataset import MSSDataset
-from utils import demix, sdr, get_model_from_config
+from utils import demix, sdr, get_model_from_config, bind_lora_to_model
 from valid import valid_multi_gpu
 
 import warnings
@@ -55,7 +56,7 @@ def manual_seed(seed):
 
 def load_not_compatible_weights(model, weights, verbose=False):
     new_model = model.state_dict()
-    old_model = torch.load(weights)
+    old_model = torch.load(weights, strict=False)
     if 'state' in old_model:
         # Fix for htdemucs weights loading
         old_model = old_model['state']
@@ -123,6 +124,8 @@ def train_model(args):
     parser.add_argument("--pre_valid", action='store_true', help='Run validation before training')
     parser.add_argument("--metrics", nargs='+', type=str, default=["sdr"], choices=['sdr', 'l1_freq', 'si_sdr', 'log_wmse', 'aura_stft', 'aura_mrstft'], help='List of metrics to use.')
     parser.add_argument("--metric_for_scheduler", default="sdr", choices=['sdr', 'l1_freq', 'si_sdr', 'log_wmse', 'aura_stft', 'aura_mrstft'], help='Metric which will be used for scheduler.')
+    parser.add_argument("--train_lora", type=bool, default=True, help="Train LoRA")
+    
     if args is None:
         args = parser.parse_args()
     else:
@@ -174,13 +177,17 @@ def train_model(args):
         pin_memory=args.pin_memory
     )
 
+    if args.train_lora != '':
+        model = bind_lora_to_model(config, model)
+        lora.mark_only_lora_as_trainable(model)
+
     if args.start_check_point != '':
         print('Start from checkpoint: {}'.format(args.start_check_point))
         if 1:
             load_not_compatible_weights(model, args.start_check_point, verbose=False)
         else:
             model.load_state_dict(
-                torch.load(args.start_check_point)
+                torch.load(args.start_check_point, strict=False)
             )
 
     if torch.cuda.is_available():
@@ -335,22 +342,28 @@ def train_model(args):
 
         # Save last
         store_path = args.results_path + '/last_{}.ckpt'.format(args.model_type)
-        state_dict = model.state_dict() if len(device_ids) <= 1 else model.module.state_dict()
-        torch.save(
-            state_dict,
-            store_path
-        )
+        if args.train_lora:
+            torch.save(lora.lora_state_dict(model), store_path)
+        else:
+            state_dict = model.state_dict() if len(device_ids) <= 1 else model.module.state_dict()
+            torch.save(
+                state_dict,
+                store_path
+            )
 
         metrics_avg = valid_multi_gpu(model, args, config, args.device_ids, verbose=False)
         metric_avg = metrics_avg[args.metric_for_scheduler]
         if metric_avg > best_metric:
             store_path = args.results_path + '/model_{}_ep_{}_{}_{:.4f}.ckpt'.format(args.model_type, epoch, args.metric_for_scheduler, metric_avg)
             print('Store weights: {}'.format(store_path))
-            state_dict = model.state_dict() if len(device_ids) <= 1 else model.module.state_dict()
-            torch.save(
-                state_dict,
-                store_path
-            )
+            if args.train_lora:
+                torch.save(lora.lora_state_dict(model), store_path)
+            else:
+                state_dict = model.state_dict() if len(device_ids) <= 1 else model.module.state_dict()
+                torch.save(
+                    state_dict,
+                    store_path
+                )
             best_metric = metric_avg
         scheduler.step(metric_avg)
         wandb.log({'metric_avg': metric_avg, 'best_metric': best_metric})

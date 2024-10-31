@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 from numpy.typing import NDArray
 from typing import Dict, List
-
+import loralib as lora
 
 def get_model_from_config(model_type, config_path):
     with open(config_path) as f:
@@ -354,3 +354,25 @@ def prefer_target_instrument(config: ConfigDict) -> List[str]:
         return [config.training.target_instrument]
     else:
         return config.training.instruments
+
+def bind_lora_to_model(config, model):
+    for name, module in model.named_modules():
+        hierarchy = name.split('.')
+        layer_name = hierarchy[-1]
+        if isinstance(module, nn.Linear) and layer_name == 'to_qkv':
+            parent_module = model
+            for submodule_name in hierarchy[:-1]:
+                parent_module = getattr(parent_module, submodule_name)
+            setattr(
+                parent_module,
+                layer_name,
+                lora.MergedLinear(
+                    in_features=module.in_features,
+                    out_features=module.out_features,
+                    enable_lora=[True, False, True],
+                    bias=module.bias is not None,
+                    **config.lora
+                )
+            )
+    
+    return model

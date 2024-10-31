@@ -130,6 +130,7 @@ def proc_folder(args):
     parser.add_argument("--flac_file", action = 'store_true', help="Output flac file instead of wav")
     parser.add_argument("--pcm_type", type=str, choices=['PCM_16', 'PCM_24'], default='PCM_24', help="PCM type for FLAC files (PCM_16 or PCM_24)")
     parser.add_argument("--use_tta", action='store_true', help="Flag adds test time augmentation during inference (polarity and channel inverse). While this triples the runtime, it reduces noise and slightly improves prediction quality.")
+    parser.add_argument("--lora_check_point", type=str, default='', help="lora checkpoint to valid weights")
     if args is None:
         args = parser.parse_args()
     else:
@@ -163,7 +164,10 @@ def proc_folder(args):
                 state_dict = state_dict['state_dict']
         else:
             state_dict = torch.load(args.start_check_point, map_location=device, weights_only=True)
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=False)
+    if args.lora_check_point != '':
+        model.load_state_dict(torch.load(args.lora_check_point, map_location=device, weights_only=True), strict=False)
+
     print("Instruments: {}".format(config.training.instruments))
 
     # in case multiple CUDA GPUs are used and --device_ids arg is passed
