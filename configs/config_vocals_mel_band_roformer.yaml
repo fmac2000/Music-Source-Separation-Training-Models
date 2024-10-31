@@ -81,8 +81,8 @@ inference:
   num_overlap: 4
 
 lora:
-  r: 0
-  lora_alpha: 1.
-  lora_dropout: 0.
+  r: 8
+  lora_alpha: 16. #alpha / rank > 1
+  lora_dropout: 0.05
   merge_weights: True
-  fan_in_fan_out: False # Set this to True if the layer to replace stores weight like (fan_in, fan_out)
+  fan_in_fan_out: False

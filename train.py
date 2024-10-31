@@ -356,7 +356,7 @@ def train_model(args):
         if metric_avg > best_metric:
             store_path = args.results_path + '/model_{}_ep_{}_{}_{:.4f}.ckpt'.format(args.model_type, epoch, args.metric_for_scheduler, metric_avg)
             print('Store weights: {}'.format(store_path))
-            if args.train_lora:
+            if args.train_lora != '':
                 torch.save(lora.lora_state_dict(model), store_path)
             else:
                 state_dict = model.state_dict() if len(device_ids) <= 1 else model.module.state_dict()
