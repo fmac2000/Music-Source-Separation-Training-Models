@@ -70,3 +70,10 @@ inference:
   batch_size: 4
   dim_t: 256
   num_overlap: 2
+
+lora:
+  r: 8
+  lora_alpha: 16. #alpha / rank > 1
+  lora_dropout: 0.05
+  merge_weights: True
+  fan_in_fan_out: False
