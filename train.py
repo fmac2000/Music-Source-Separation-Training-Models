@@ -56,7 +56,7 @@ def manual_seed(seed):
 
 def load_not_compatible_weights(model, weights, verbose=False):
     new_model = model.state_dict()
-    old_model = torch.load(weights, strict=False)
+    old_model = torch.load(weights)
     if 'state' in old_model:
         # Fix for htdemucs weights loading
         old_model = old_model['state']
@@ -100,7 +100,7 @@ def load_not_compatible_weights(model, weights, verbose=False):
             if verbose:
                 print('Match not found for {}!'.format(el))
     model.load_state_dict(
-        new_model
+        new_model, strict=False
     )
 
 
@@ -187,7 +187,7 @@ def train_model(args):
             load_not_compatible_weights(model, args.start_check_point, verbose=False)
         else:
             model.load_state_dict(
-                torch.load(args.start_check_point, strict=False)
+                torch.load(args.start_check_point), strict=False
             )
 
     if torch.cuda.is_available():
