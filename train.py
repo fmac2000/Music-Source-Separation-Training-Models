@@ -261,7 +261,7 @@ def train_model(args):
         loss_multistft = auraloss.freq.MultiResolutionSTFTLoss(
             **loss_options
         )
-
+    
     scaler = GradScaler()
     print('Train for: {}'.format(config.training.num_epochs))
     best_metric = -10000
@@ -342,7 +342,7 @@ def train_model(args):
 
         # Save last
         store_path = args.results_path + '/last_{}.ckpt'.format(args.model_type)
-        if args.train_lora:
+        if args.train_lora != '':
             torch.save(lora.lora_state_dict(model), store_path)
         else:
             state_dict = model.state_dict() if len(device_ids) <= 1 else model.module.state_dict()
