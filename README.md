@@ -2,6 +2,36 @@
 
 Repository for training models for music source separation. Repository is based on [kuielab code](https://github.com/kuielab/sdx23/tree/mdx_AB/my_submission/src) for [SDX23 challenge](https://github.com/kuielab/sdx23/tree/mdx_AB/my_submission/src). The main idea of this repository is to create training code, which is easy to modify for experiments. Brought to you by [MVSep.com](https://mvsep.com).
 
+## Lora
+(mel-band and bs roformers only atm - if you want me to do scnet lmk)
+Ensure you train with a start_check_point and enable lora flag, lora's config is found in configs/KimberleyJensen/config_vocals_mel_band_roformer_kj.yaml
+
+```bash
+python train.py \
+    --model_type mel_band_roformer \
+    --results_path results/ \
+    --data_path 'datasets/dataset1' 'datasets/dataset2' \
+    --valid_path datasets/musdb18hq/test \
+    --num_workers 4 \
+    --device_ids 0
+
+    --config_path configs/KimberleyJensen/config_vocals_mel_band_roformer_kj.yaml \
+    --start_check_point results/model.ckpt \
+    --train_lora True
+```
+
+To Inference load the same checkpoint you trained your lora with using 'start_check_point' and set 'lora_check_point' to the saved lora weights
+
+```bash
+python inference.py \
+    --model_type mel_band_roformer \
+    --config_path configs/KimberleyJensen/config_vocals_mel_band_roformer_kj.yaml \
+    --start_check_point results/last_mel_band_roformer.ckpt \
+    --input_folder input/wavs/ \
+    --store_dir separation_results/
+    --lora_check_point results/lora.ckpt
+```
+
 ## Models
 
 Model can be chosen with `--model_type` arg.
