@@ -26,7 +26,7 @@ import torch.nn.functional as F
 from dataset import MSSDataset
 
 from utils import demix, sdr, get_model_from_config, bind_lora_to_model
-from valid import valid_multi_gpu
+from valid import valid_multi_gpu, valid
 
 import warnings
 
