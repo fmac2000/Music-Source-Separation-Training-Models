@@ -76,4 +76,8 @@ lora:
   lora_alpha: 16. #alpha / rank > 1
   lora_dropout: 0.05
   merge_weights: True
+<<<<<<< HEAD
   fan_in_fan_out: False
+=======
+  fan_in_fan_out: False
+>>>>>>> 35129ff2dea742e017832d05792ab4c25c2c0c47
