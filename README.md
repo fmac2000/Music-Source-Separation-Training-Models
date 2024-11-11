@@ -4,7 +4,7 @@ Repository for training models for music source separation. Repository is based 
 
 ## Lora
 (mel-band and bs roformers only atm - if you want me to do scnet lmk)
-Ensure you train with a start_check_point and enable lora flag, lora's config is found in configs/KimberleyJensen/config_vocals_mel_band_roformer_kj.yaml
+Ensure you train with a 'start_check_point' and enable 'train_lora' flag, lora's config is found in configs/KimberleyJensen/config_vocals_mel_band_roformer_kj.yaml
 
 ```bash
 python train.py \
