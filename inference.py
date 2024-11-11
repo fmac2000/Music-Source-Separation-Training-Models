@@ -1,181 +1,373 @@
 # coding: utf-8
 __author__ = 'Roman Solovyev (ZFTurbo): https://github.com/ZFTurbo/'
+__version__ = '1.0.4'
 
+import random
 import argparse
 import time
-import librosa
+import copy
 from tqdm.auto import tqdm
 import sys
 import os
 import glob
 import torch
-import numpy as np
+import wandb
 import soundfile as sf
+import numpy as np
+import auraloss
+import loralib as lora
 import torch.nn as nn
-from utils import prefer_target_instrument
+from torch.optim import Adam, AdamW, SGD, RAdam, RMSprop
+from torch.utils.data import DataLoader
+from torch.cuda.amp.grad_scaler import GradScaler
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+import torch.nn.functional as F
 
-# Using the embedded version of Python can also correctly import the utils module.
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(current_dir)
-from utils import demix, get_model_from_config
+from dataset import MSSDataset
+from utils import demix, sdr, get_model_from_config, bind_lora_to_model
+from valid import valid_multi_gpu
 
 import warnings
+
 warnings.filterwarnings("ignore")
 
 
-def run_folder(model, args, config, device, verbose=False):
-    start_time = time.time()
-    model.eval()
-    all_mixtures_path = glob.glob(args.input_folder + '/*.*')
-    all_mixtures_path.sort()
-    print('Total files found: {}'.format(len(all_mixtures_path)))
+def masked_loss(y_, y, q, coarse=True):
+    # shape = [num_sources, batch_size, num_channels, chunk_size]
+    loss = torch.nn.MSELoss(reduction='none')(y_, y).transpose(0, 1)
+    if coarse:
+        loss = torch.mean(loss, dim=(-1, -2))
+    loss = loss.reshape(loss.shape[0], -1)
+    L = loss.detach()
+    quantile = torch.quantile(L, q, interpolation='linear', dim=1, keepdim=True)
+    mask = L < quantile
+    return (loss * mask).mean()
 
-    instruments = prefer_target_instrument(config)
 
-    os.makedirs(args.store_dir, exist_ok=True)
+def manual_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # if multi-GPU
+    torch.backends.cudnn.deterministic = True
+    os.environ["PYTHONHASHSEED"] = str(seed)
 
-    if not verbose:
-        all_mixtures_path = tqdm(all_mixtures_path, desc="Total progress")
 
-    if args.disable_detailed_pbar:
-        detailed_pbar = False
-    else:
-        detailed_pbar = True
+def load_not_compatible_weights(model, weights, verbose=False):
+    new_model = model.state_dict()
+    old_model = torch.load(weights)
+    if 'state' in old_model:
+        # Fix for htdemucs weights loading
+        old_model = old_model['state']
+    if 'state_dict' in old_model:
+        # Fix for apollo weights loading
+        old_model = old_model['state_dict']
 
-    for path in all_mixtures_path:
-        print("Starting processing track: ", path)
-        if not verbose:
-            all_mixtures_path.set_postfix({'track': os.path.basename(path)})
-        try:
-            mix, sr = librosa.load(path, sr=44100, mono=False)
-        except Exception as e:
-            print('Cannot read track: {}'.format(path))
-            print('Error message: {}'.format(str(e)))
-            continue
-
-        # Convert mono to stereo if needed
-        if len(mix.shape) == 1:
-            mix = np.stack([mix, mix], axis=0)
-
-        mix_orig = mix.copy()
-        if 'normalize' in config.inference:
-            if config.inference['normalize'] is True:
-                mono = mix.mean(0)
-                mean = mono.mean()
-                std = mono.std()
-                mix = (mix - mean) / std
-
-        if args.use_tta:
-            # orig, channel inverse, polarity inverse
-            track_proc_list = [mix.copy(), mix[::-1].copy(), -1. * mix.copy()]
-        else:
-            track_proc_list = [mix.copy()]
-
-        full_result = []
-        for mix in track_proc_list:
-            waveforms = demix(config, model, mix, device, pbar=detailed_pbar, model_type=args.model_type)
-            full_result.append(waveforms)
-
-        # Average all values in single dict
-        waveforms = full_result[0]
-        for i in range(1, len(full_result)):
-            d = full_result[i]
-            for el in d:
-                if i == 2:
-                    waveforms[el] += -1.0 * d[el]
-                elif i == 1:
-                    waveforms[el] += d[el][::-1].copy()
-                else:
-                    waveforms[el] += d[el]
-        for el in waveforms:
-            waveforms[el] = waveforms[el] / len(full_result)
-
-        # Create a new `instr` in instruments list, 'instrumental' 
-        if args.extract_instrumental:
-            instr = 'vocals' if 'vocals' in instruments else instruments[0]
-            if 'instrumental' not in instruments:
-                instruments.append('instrumental')
-            # Output "instrumental", which is an inverse of 'vocals' or the first stem in list if 'vocals' absent
-            waveforms['instrumental'] = mix_orig - waveforms[instr]
-
-        for instr in instruments:
-            estimates = waveforms[instr].T
-            if 'normalize' in config.inference:
-                if config.inference['normalize'] is True:
-                    estimates = estimates * std + mean
-            file_name, _ = os.path.splitext(os.path.basename(path))
-            if args.flac_file:
-                output_file = os.path.join(args.store_dir, f"{file_name}_{instr}.flac")
-                subtype = 'PCM_16' if args.pcm_type == 'PCM_16' else 'PCM_24'
-                sf.write(output_file, estimates, sr, subtype=subtype)
+    for el in new_model:
+        if el in old_model:
+            if verbose:
+                print('Match found for {}!'.format(el))
+            if new_model[el].shape == old_model[el].shape:
+                if verbose:
+                    print('Action: Just copy weights!')
+                new_model[el] = old_model[el]
             else:
-                output_file = os.path.join(args.store_dir, f"{file_name}_{instr}.wav")
-                sf.write(output_file, estimates, sr, subtype='FLOAT')
+                if len(new_model[el].shape) != len(old_model[el].shape):
+                    if verbose:
+                        print('Action: Different dimension! Too lazy to write the code... Skip it')
+                else:
+                    if verbose:
+                        print('Shape is different: {} != {}'.format(tuple(new_model[el].shape), tuple(old_model[el].shape)))
+                    ln = len(new_model[el].shape)
+                    max_shape = []
+                    slices_old = []
+                    slices_new = []
+                    for i in range(ln):
+                        max_shape.append(max(new_model[el].shape[i], old_model[el].shape[i]))
+                        slices_old.append(slice(0, old_model[el].shape[i]))
+                        slices_new.append(slice(0, new_model[el].shape[i]))
+                    # print(max_shape)
+                    # print(slices_old, slices_new)
+                    slices_old = tuple(slices_old)
+                    slices_new = tuple(slices_new)
+                    max_matrix = np.zeros(max_shape, dtype=np.float32)
+                    for i in range(ln):
+                        max_matrix[slices_old] = old_model[el].cpu().numpy()
+                    max_matrix = torch.from_numpy(max_matrix)
+                    new_model[el] = max_matrix[slices_new]
+        else:
+            if verbose:
+                print('Match not found for {}!'.format(el))
+    model.load_state_dict(
+        new_model, strict=False
+    )
 
-    time.sleep(1)
-    print("Elapsed time: {:.2f} sec".format(time.time() - start_time))
 
-
-def proc_folder(args):
+def train_model(args):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_type", type=str, default='mdx23c', help="One of bandit, bandit_v2, bs_roformer, htdemucs, mdx23c, mel_band_roformer, scnet, scnet_unofficial, segm_models, swin_upernet, torchseg")
+    parser.add_argument("--model_type", type=str, default='mdx23c', help="One of mdx23c, htdemucs, segm_models, mel_band_roformer, bs_roformer, swin_upernet, bandit")
     parser.add_argument("--config_path", type=str, help="path to config file")
-    parser.add_argument("--start_check_point", type=str, default='', help="Initial checkpoint to valid weights")
-    parser.add_argument("--input_folder", type=str, help="folder with mixtures to process")
-    parser.add_argument("--store_dir", default="", type=str, help="path to store results as wav file")
-    parser.add_argument("--device_ids", nargs='+', type=int, default=0, help='list of gpu ids')
-    parser.add_argument("--extract_instrumental", action='store_true', help="invert vocals to get instrumental if provided")
-    parser.add_argument("--disable_detailed_pbar", action='store_true', help="disable detailed progress bar")
-    parser.add_argument("--force_cpu", action = 'store_true', help="Force the use of CPU even if CUDA is available")
-    parser.add_argument("--flac_file", action = 'store_true', help="Output flac file instead of wav")
-    parser.add_argument("--pcm_type", type=str, choices=['PCM_16', 'PCM_24'], default='PCM_24', help="PCM type for FLAC files (PCM_16 or PCM_24)")
-    parser.add_argument("--use_tta", action='store_true', help="Flag adds test time augmentation during inference (polarity and channel inverse). While this triples the runtime, it reduces noise and slightly improves prediction quality.")
+    parser.add_argument("--start_check_point", type=str, default='', help="Initial checkpoint to start training")
+    parser.add_argument("--results_path", type=str, help="path to folder where results will be stored (weights, metadata)")
+    parser.add_argument("--data_path", nargs="+", type=str, help="Dataset data paths. You can provide several folders.")
+    parser.add_argument("--dataset_type", type=int, default=1, help="Dataset type. Must be one of: 1, 2, 3 or 4. Details here: https://github.com/ZFTurbo/Music-Source-Separation-Training/blob/main/docs/dataset_types.md")
+    parser.add_argument("--valid_path", nargs="+", type=str, help="validation data paths. You can provide several folders.")
+    parser.add_argument("--num_workers", type=int, default=0, help="dataloader num_workers")
+    parser.add_argument("--pin_memory", type=bool, default=False, help="dataloader pin_memory")
+    parser.add_argument("--seed", type=int, default=0, help="random seed")
+    parser.add_argument("--device_ids", nargs='+', type=int, default=[0], help='list of gpu ids')
+    parser.add_argument("--use_multistft_loss", action='store_true', help="Use MultiSTFT Loss (from auraloss package)")
+    parser.add_argument("--use_mse_loss", action='store_true', help="Use default MSE loss")
+    parser.add_argument("--use_l1_loss", action='store_true', help="Use L1 loss")
+    parser.add_argument("--wandb_key", type=str, default='', help='wandb API Key')
+    parser.add_argument("--pre_valid", action='store_true', help='Run validation before training')
+    parser.add_argument("--metrics", nargs='+', type=str, default=["sdr"], choices=['sdr', 'l1_freq', 'si_sdr', 'log_wmse', 'aura_stft', 'aura_mrstft'], help='List of metrics to use.')
+    parser.add_argument("--metric_for_scheduler", default="sdr", choices=['sdr', 'l1_freq', 'si_sdr', 'log_wmse', 'aura_stft', 'aura_mrstft'], help='Metric which will be used for scheduler.')
+    parser.add_argument("--train_lora", type=bool, default=True, help="Train LoRA")
+    
     if args is None:
         args = parser.parse_args()
     else:
         args = parser.parse_args(args)
 
-    device = "cpu"
-    if args.force_cpu:
-        device = "cpu"
-    elif torch.cuda.is_available():
-        print('CUDA is available, use --force_cpu to disable it.')
-        device = "cuda"
-        device = f'cuda:{args.device_ids[0]}' if type(args.device_ids) == list else f'cuda:{args.device_ids}'
-    elif torch.backends.mps.is_available():
-        device = "mps"
-
-    print("Using device: ", device)
-
-    model_load_start_time = time.time()
-    torch.backends.cudnn.benchmark = True
+    manual_seed(args.seed + int(time.time()))
+    # torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False # Fix possible slow down with dilation convolutions
+    torch.multiprocessing.set_start_method('spawn')
 
     model, config = get_model_from_config(args.model_type, args.config_path)
-    if args.start_check_point != '':
-        print('Start from checkpoint: {}'.format(args.start_check_point))
-        if args.model_type in ['htdemucs', 'apollo']:
-            state_dict = torch.load(args.start_check_point, map_location=device, weights_only=False)
-            # Fix for htdemucs pretrained models
-            if 'state' in state_dict:
-                state_dict = state_dict['state']
-            # Fix for apollo pretrained models
-            if 'state_dict' in state_dict:
-                state_dict = state_dict['state_dict']
-        else:
-            state_dict = torch.load(args.start_check_point, map_location=device, weights_only=True)
-        model.load_state_dict(state_dict)
     print("Instruments: {}".format(config.training.instruments))
 
-    # in case multiple CUDA GPUs are used and --device_ids arg is passed
-    if type(args.device_ids) == list and len(args.device_ids) > 1 and not args.force_cpu:
-        model = nn.DataParallel(model, device_ids = args.device_ids)
+    if args.metric_for_scheduler not in args.metrics:
+        args.metrics += [args.metric_for_scheduler]
+    print('Metrics for training: {}. Metric for scheduler: {}'.format(args.metrics, args.metric_for_scheduler))
 
-    model = model.to(device)
+    os.makedirs(args.results_path, exist_ok=True)
 
-    print("Model load time: {:.2f} sec".format(time.time() - model_load_start_time))
+    use_amp = True
+    try:
+        use_amp = config.training.use_amp
+    except:
+        pass
 
-    run_folder(model, args, config, device, verbose=True)
+    device_ids = args.device_ids
+    batch_size = config.training.batch_size * len(device_ids)
+
+    # wandb
+    if args.wandb_key is None or args.wandb_key.strip() == '':
+        wandb.init(mode='disabled')
+    else:
+        wandb.login(key=args.wandb_key)
+        wandb.init(project='msst', config={'config': config, 'args': args, 'device_ids': device_ids, 'batch_size': batch_size })
+
+    trainset = MSSDataset(
+        config,
+        args.data_path,
+        batch_size=batch_size,
+        metadata_path=os.path.join(args.results_path, 'metadata_{}.pkl'.format(args.dataset_type)),
+        dataset_type=args.dataset_type,
+    )
+
+    train_loader = DataLoader(
+        trainset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory
+    )
+
+    if args.train_lora != '':
+        model = bind_lora_to_model(config, model)
+        lora.mark_only_lora_as_trainable(model)
+
+    if args.start_check_point != '':
+        print('Start from checkpoint: {}'.format(args.start_check_point))
+        if 1:
+            load_not_compatible_weights(model, args.start_check_point, verbose=False)
+        else:
+            model.load_state_dict(
+                torch.load(args.start_check_point), strict=False
+            )
+
+    if torch.cuda.is_available():
+        if len(device_ids) <= 1:
+            print('Use single GPU: {}'.format(device_ids))
+            device = torch.device(f'cuda:{device_ids[0]}')
+            model = model.to(device)
+        else:
+            print('Use multi GPU: {}'.format(device_ids))
+            device = torch.device(f'cuda:{device_ids[0]}')
+            model = nn.DataParallel(model, device_ids=device_ids).to(device)
+    else:
+        device = 'cpu'
+        print('CUDA is not avilable. Run training on CPU. It will be very slow...')
+        model = model.to(device)
+
+    if args.pre_valid:
+        valid_multi_gpu(model, args, config, args.device_ids, verbose=True)
+
+    optim_params = dict()
+    if 'optimizer' in config:
+        optim_params = dict(config['optimizer'])
+        print('Optimizer params from config:\n{}'.format(optim_params))
+
+    if config.training.optimizer == 'adam':
+        optimizer = Adam(model.parameters(), lr=config.training.lr, **optim_params)
+    elif config.training.optimizer == 'adamw':
+        optimizer = AdamW(model.parameters(), lr=config.training.lr, **optim_params)
+    elif config.training.optimizer == 'radam':
+        optimizer = RAdam(model.parameters(), lr=config.training.lr, **optim_params)
+    elif config.training.optimizer == 'rmsprop':
+        optimizer = RMSprop(model.parameters(), lr=config.training.lr, **optim_params)
+    elif config.training.optimizer == 'prodigy':
+        from prodigyopt import Prodigy
+        # you can choose weight decay value based on your problem, 0 by default
+        # We recommend using lr=1.0 (default) for all networks.
+        optimizer = Prodigy(model.parameters(), lr=config.training.lr, **optim_params)
+    elif config.training.optimizer == 'adamw8bit':
+        import bitsandbytes as bnb
+        optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=config.training.lr, **optim_params)
+    elif config.training.optimizer == 'sgd':
+        print('Use SGD optimizer')
+        optimizer = SGD(model.parameters(), lr=config.training.lr, **optim_params)
+    else:
+        print('Unknown optimizer: {}'.format(config.training.optimizer))
+        exit()
+
+    gradient_accumulation_steps = 1
+    try:
+        gradient_accumulation_steps = int(config.training.gradient_accumulation_steps)
+    except:
+        pass
+
+    print("Patience: {} Reduce factor: {} Batch size: {} Grad accum steps: {} Effective batch size: {} Optimizer: {}".format(
+        config.training.patience,
+        config.training.reduce_factor,
+        batch_size,
+        gradient_accumulation_steps,
+        batch_size * gradient_accumulation_steps,
+        config.training.optimizer,
+    ))
+    # Reduce LR if no metric improvements for several epochs
+    scheduler = ReduceLROnPlateau(optimizer, 'max', patience=config.training.patience, factor=config.training.reduce_factor)
+
+    if args.use_multistft_loss:
+        try:
+            loss_options = dict(config.loss_multistft)
+        except:
+            loss_options = dict()
+        print('Loss options: {}'.format(loss_options))
+        loss_multistft = auraloss.freq.MultiResolutionSTFTLoss(
+            **loss_options
+        )
+    
+    scaler = GradScaler()
+    print('Train for: {}'.format(config.training.num_epochs))
+    best_metric = -10000
+    for epoch in range(config.training.num_epochs):
+        model.train().to(device)
+        print('Train epoch: {} Learning rate: {}'.format(epoch, optimizer.param_groups[0]['lr']))
+        loss_val = 0.
+        total = 0
+
+        # total_loss = None
+        pbar = tqdm(train_loader)
+        for i, (batch, mixes) in enumerate(pbar):
+            y = batch.to(device)
+            x = mixes.to(device)  # mixture
+
+            if 'normalize' in config.training:
+                if config.training.normalize:
+                    mean = x.mean()
+                    std = x.std()
+                    if std != 0:
+                        x = (x - mean) / std
+                        y = (y - mean) / std
+
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                if args.model_type in ['mel_band_roformer', 'bs_roformer']:
+                    # loss is computed in forward pass
+                    loss = model(x, y)
+                    if type(device_ids) != int:
+                        # If it's multiple GPUs sum partial loss
+                        loss = loss.mean()
+                else:
+                    y_ = model(x)
+                    if args.use_multistft_loss:
+                        if len(y_.shape) == 3:
+                            # For models like apollo no need to reshape
+                            y1_ = y_
+                            y1 = y
+                        else:
+                            y1_ = torch.reshape(y_, (y_.shape[0], y_.shape[1] * y_.shape[2], y_.shape[3]))
+                            y1 = torch.reshape(y, (y.shape[0], y.shape[1] * y.shape[2], y.shape[3]))
+                        loss = loss_multistft(y1_, y1)
+                        # We can use many losses at the same time
+                        if args.use_mse_loss:
+                            loss += 1000 * nn.MSELoss()(y1_, y1)
+                        if args.use_l1_loss:
+                            loss += 1000 * F.l1_loss(y1_, y1)
+                    elif args.use_mse_loss:
+                        loss = nn.MSELoss()(y_, y)
+                    elif args.use_l1_loss:
+                        loss = F.l1_loss(y_, y)
+                    else:
+                        loss = masked_loss(
+                            y_,
+                            y,
+                            q=config.training.q,
+                            coarse=config.training.coarse_loss_clip
+                        )
+
+            loss /= gradient_accumulation_steps
+            scaler.scale(loss).backward()
+            if config.training.grad_clip:
+                nn.utils.clip_grad_norm_(model.parameters(), config.training.grad_clip)
+
+            if ((i + 1) % gradient_accumulation_steps == 0) or (i == len(train_loader) - 1):
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+
+            li = loss.item() * gradient_accumulation_steps
+            loss_val += li
+            total += 1
+            pbar.set_postfix({'loss': 100 * li, 'avg_loss': 100 * loss_val / (i + 1)})
+            wandb.log({'loss': 100 * li, 'avg_loss': 100 * loss_val / (i + 1), 'total': total, 'loss_val': loss_val, 'i': i })
+            loss.detach()
+
+        print('Training loss: {:.6f}'.format(loss_val / total))
+        wandb.log({'train_loss': loss_val / total, 'epoch': epoch})
+
+        # Save last
+        store_path = args.results_path + '/last_{}.ckpt'.format(args.model_type)
+        if args.train_lora != '':
+            torch.save(lora.lora_state_dict(model), store_path)
+        else:
+            state_dict = model.state_dict() if len(device_ids) <= 1 else model.module.state_dict()
+            torch.save(
+                state_dict,
+                store_path
+            )
+
+        metrics_avg = valid_multi_gpu(model, args, config, args.device_ids, verbose=False)
+        metric_avg = metrics_avg[args.metric_for_scheduler]
+        if metric_avg > best_metric:
+            store_path = args.results_path + '/model_{}_ep_{}_{}_{:.4f}.ckpt'.format(args.model_type, epoch, args.metric_for_scheduler, metric_avg)
+            print('Store weights: {}'.format(store_path))
+            if args.train_lora != '':
+                torch.save(lora.lora_state_dict(model), store_path)
+            else:
+                state_dict = model.state_dict() if len(device_ids) <= 1 else model.module.state_dict()
+                torch.save(
+                    state_dict,
+                    store_path
+                )
+            best_metric = metric_avg
+        scheduler.step(metric_avg)
+        wandb.log({'metric_avg': metric_avg, 'best_metric': best_metric})
 
 
 if __name__ == "__main__":
-    proc_folder(None)
+    train_model(None)
