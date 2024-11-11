@@ -39,13 +39,13 @@ model:
   multi_stft_normalized: False
 
 training:
-  batch_size: 4
+  batch_size: 1
   gradient_accumulation_steps: 1
   grad_clip: 0
   instruments:
   - vocals
   - other
-  lr: 1.0e-05
+  lr: 1.0e-04
   patience: 2
   reduce_factor: 0.95
   target_instrument: vocals
@@ -70,3 +70,10 @@ inference:
   batch_size: 4
   dim_t: 256
   num_overlap: 2
+
+lora:
+  r: 8
+  lora_alpha: 16. #alpha / rank > 1
+  lora_dropout: 0.05
+  merge_weights: True
+  fan_in_fan_out: False
