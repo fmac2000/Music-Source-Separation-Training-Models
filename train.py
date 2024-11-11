@@ -24,6 +24,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.nn.functional as F
 
 from dataset import MSSDataset
+
 from utils import demix, sdr, get_model_from_config, bind_lora_to_model
 from valid import valid_multi_gpu
 
@@ -122,10 +123,10 @@ def train_model(args):
     parser.add_argument("--use_l1_loss", action='store_true', help="Use L1 loss")
     parser.add_argument("--wandb_key", type=str, default='', help='wandb API Key')
     parser.add_argument("--pre_valid", action='store_true', help='Run validation before training')
-    parser.add_argument("--metrics", nargs='+', type=str, default=["sdr"], choices=['sdr', 'l1_freq', 'si_sdr', 'log_wmse', 'aura_stft', 'aura_mrstft'], help='List of metrics to use.')
-    parser.add_argument("--metric_for_scheduler", default="sdr", choices=['sdr', 'l1_freq', 'si_sdr', 'log_wmse', 'aura_stft', 'aura_mrstft'], help='Metric which will be used for scheduler.')
-    parser.add_argument("--train_lora", type=bool, default=True, help="Train LoRA")
-    
+    parser.add_argument("--metrics", nargs='+', type=str, default=["sdr"], choices=['sdr', 'l1_freq', 'si_sdr', 'log_wmse', 'aura_stft', 'aura_mrstft', 'bleedless', 'fullness'], help='List of metrics to use.')
+    parser.add_argument("--metric_for_scheduler", default="sdr", choices=['sdr', 'l1_freq', 'si_sdr', 'log_wmse', 'aura_stft', 'aura_mrstft', 'bleedless', 'fullness'], help='Metric which will be used for scheduler.')
+    parser.add_argument("--train_lora", type=bool, default=False, help="Train LoRA")
+
     if args is None:
         args = parser.parse_args()
     else:
@@ -351,7 +352,10 @@ def train_model(args):
                 store_path
             )
 
-        metrics_avg = valid_multi_gpu(model, args, config, args.device_ids, verbose=False)
+        if torch.cuda.is_available() and len(device_ids) > 1:
+            metrics_avg = valid_multi_gpu(model, args, config, args.device_ids, verbose=False)
+        else:
+            metrics_avg = valid(model, args, config, device, verbose=False)
         metric_avg = metrics_avg[args.metric_for_scheduler]
         if metric_avg > best_metric:
             store_path = args.results_path + '/model_{}_ep_{}_{}_{:.4f}.ckpt'.format(args.model_type, epoch, args.metric_for_scheduler, metric_avg)
@@ -366,7 +370,9 @@ def train_model(args):
                 )
             best_metric = metric_avg
         scheduler.step(metric_avg)
-        wandb.log({'metric_avg': metric_avg, 'best_metric': best_metric})
+        wandb.log({'metric_main': metric_avg, 'best_metric': best_metric})
+        for metric_name in metrics_avg:
+            wandb.log({'metric_{}'.format(metric_name): metrics_avg[metric_name]})
 
 
 if __name__ == "__main__":
